@@ -3,6 +3,7 @@ import random
 import difflib
 import sqlite3
 import datetime
+from html import escape
 
 import pandas as pd
 import streamlit as st
@@ -17,7 +18,6 @@ def init_db():
     existing_cols = [
         r[1] for r in conn.execute("PRAGMA table_info(records)").fetchall()
     ]
-    # 如果是舊版本資料表結構（沒有 digits / correct 欄位），重建資料表
     if existing_cols and ("digits" not in existing_cols or "correct" not in existing_cols):
         conn.execute("DROP TABLE records")
         conn.commit()
@@ -68,9 +68,74 @@ Q2_HEX = {
     9: "0c",
 }
 
+TEMPLATE_117001 = """subdesign 117001
+(
+    clk:input;
+    d1,d2,d3,d4:output;
+    a,b,c,d,e,f,g,dp:output;
+)
+variable
+    cnt[15..0]:dff;
+begin
+    cnt[].clk=!clk;
+    cnt[]=cnt[]+1;
+    table
+        cnt[15..14]=>d1,d2,d3,d4,a,b,c,d,e,f,g,dp;
+        {row0}
+        {row1}
+        {row2}
+        {row3}
+    end table;
+end;"""
+
+TEMPLATE_117002 = """subdesign 117002
+(
+    clk,colume[2..0]    :input;
+    row[3..0],a,b,c,d,e,f,g : output;
+)
+variable
+    cnt[17..0],edge[1..0] :dff;
+    disp[6..0] :latch;
+begin
+    cnt[].clk=!clk;
+    cnt[]=cnt[]+1;
+    table
+        cnt[17..16]=>row[3..0];
+        0=>1;
+        1=>2;
+        2=>4;
+        3=>8;
+    end table;
+    edge[].clk=!cnt[11];
+    edge[0]=colume[0]#colume[1]#colume[2];
+    edge[1]=edge[0];
+    disp[].ena=edge[0]&!edge[1];
+    table
+        row[3..0],colume[2..0]=>disp[];
+        1,1=>h"4f";
+        1,2=>h"12";
+        1,4=>h"06";
+        2,1=>h"4c";
+        2,2=>h"24";
+        2,4=>h"20";
+        4,1=>h"0f";
+        4,2=>h"00";
+        4,4=>h"0c";
+        8,1=>h"{hex1}";
+        8,2=>h"01";
+        8,4=>h"{hex2}";
+    end table;
+    a=disp[6];
+    b=disp[5];
+    c=disp[4];
+    d=disp[3];
+    e=disp[2];
+    f=disp[1];
+    g=disp[0];
+end;"""
+
 
 def decode_hex_segments(hex_str: str):
-    """把 active-low 的 16 進位字型碼解成 (a,b,c,d,e,f,g) 是否點亮的布林值"""
     val = int(hex_str, 16) & 0x7F
     bits = [(val >> i) & 1 for i in range(6, -1, -1)]
     return tuple(bit == 0 for bit in bits)
@@ -78,42 +143,17 @@ def decode_hex_segments(hex_str: str):
 
 def build_117001(digits):
     dsel = [(1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1)]
-    rows = []
+    rows = {}
     for i, digit in enumerate(digits):
         seg = Q1_SEGMENTS[digit]
         dp_bit = 0 if i == 2 else 1  # active-low：第 3 位數後方顯示小數點
         vals = list(dsel[i]) + list(seg) + [dp_bit]
-        rows.append(f"{i}=>{','.join(map(str, vals))};")
-    return (
-        "subdesign 117001 ( clk:input; d1,d2,d3,d4:output; "
-        "a,b,c,d,e,f,g,dp:output; ) variable cnt[15..0]:dff; "
-        "begin cnt[].clk=!clk; cnt[]=cnt[]+1; "
-        "table cnt[15..14]=>d1,d2,d3,d4,a,b,c,d,e,f,g,dp; "
-        + " ".join(rows)
-        + " end table; end;"
-    )
+        rows[f"row{i}"] = f"{i}=>{','.join(map(str, vals))};"
+    return TEMPLATE_117001.format(**rows)
 
 
 def build_117002(d1, d2):
-    hex1, hex2 = Q2_HEX[d1], Q2_HEX[d2]
-    return (
-        "subdesign 117002 ( clk,colume[2..0] :input; "
-        "row[3..0],a,b,c,d,e,f,g : output; ) "
-        "variable cnt[17..0],edge[1..0] :dff; disp[6..0] :latch; "
-        "begin cnt[].clk=!clk; cnt[]=cnt[]+1; "
-        "table cnt[17..16]=>row[3..0]; 0=>1; 1=>2; 2=>4; 3=>8; end table; "
-        "edge[].clk=!cnt[11]; "
-        "edge[0]=colume[0]#colume[1]#colume[2]; edge[1]=edge[0]; "
-        "disp[].ena=edge[0]&!edge[1]; "
-        "table row[3..0],colume[2..0]=>disp[]; "
-        "1,1=>h\"4f\"; 1,2=>h\"12\"; 1,4=>h\"06\"; "
-        "2,1=>h\"4c\"; 2,2=>h\"24\"; 2,4=>h\"20\"; "
-        "4,1=>h\"0f\"; 4,2=>h\"00\"; 4,4=>h\"0c\"; "
-        f"8,1=>h\"{hex1}\"; 8,2=>h\"01\"; 8,4=>h\"{hex2}\"; "
-        "end table; "
-        "a=disp[6]; b=disp[5]; c=disp[4]; d=disp[3]; "
-        "e=disp[2]; f=disp[1]; g=disp[0]; end;"
-    )
+    return TEMPLATE_117002.format(hex1=Q2_HEX[d1], hex2=Q2_HEX[d2])
 
 
 QUESTIONS = {
@@ -129,8 +169,8 @@ QUESTIONS = {
   - 該位數對應要顯示的七段字型（`a`~`g`, `dp`）
 - 因為只用最高兩位，所以每個掃描狀態會維持計數器的低 14 位跑完一輪，掃描速度夠快，
   肉眼因視覺暫留會覺得四位數字是「同時」穩定顯示，其實是輪流快速切換的動態掃描（多工顯示）。
-- 檢定時四個數字會隨機指定，且第 3 位數後方會亮小數點（例如畫面顯示 456.3），
-  需依指定的顯示圖案自行填入對應的七段字型碼與小數點位元。
+- 檢定時四個數字會隨機指定，且第 3 位數後方會亮小數點，需依指定的顯示圖案自行填入
+  對應的七段字型碼與小數點位元。
 
 **重點觀念**：時脈除頻 + table 對照 + 動態掃描（多工），是七段顯示器常見的省接腳做法。
 """,
@@ -166,25 +206,57 @@ def is_correct(correct: str, user_input: str) -> bool:
     return normalize(correct) == normalize(user_input)
 
 
-def diff_html(correct: str, user_input: str) -> str:
-    a, b = normalize(correct), normalize(user_input)
-    sm = difflib.SequenceMatcher(None, a, b)
-    parts = []
+def diff_pretty_html(correct_code: str, user_code: str) -> str:
+    """保留 correct_code 原本的縮排/換行（直式），只在非空白字元上標示對錯"""
+    norm_correct_chars = []
+    map_correct = []
+    for i, ch in enumerate(correct_code):
+        if not ch.isspace():
+            norm_correct_chars.append(ch)
+            map_correct.append(i)
+    norm_correct_str = "".join(norm_correct_chars)
+    norm_user_str = normalize(user_code)
+
+    status = ["wrong"] * len(norm_correct_str)
+    extra_count = 0
+    sm = difflib.SequenceMatcher(None, norm_correct_str, norm_user_str)
     for tag, i1, i2, j1, j2 in sm.get_opcodes():
         if tag == "equal":
-            parts.append(f"<span style='color:#e5e5e7'>{a[i1:i2]}</span>")
-        elif tag == "replace":
-            parts.append(
-                f"<span style='color:#ff6961;text-decoration:line-through'>{a[i1:i2]}</span>"
-            )
-            parts.append(f"<span style='color:#30d158'>{b[j1:j2]}</span>")
-        elif tag == "delete":
-            parts.append(
-                f"<span style='color:#ff6961;text-decoration:line-through'>{a[i1:i2]}</span>"
-            )
+            for k in range(i1, i2):
+                status[k] = "ok"
         elif tag == "insert":
-            parts.append(f"<span style='color:#30d158'>{b[j1:j2]}</span>")
-    return "".join(parts)
+            extra_count += j2 - j1
+        elif tag == "replace":
+            extra_count += j2 - j1
+
+    char_status = {}
+    for norm_idx, orig_idx in enumerate(map_correct):
+        char_status[orig_idx] = status[norm_idx]
+
+    parts = []
+    for i, ch in enumerate(correct_code):
+        if ch.isspace():
+            parts.append(ch)
+        else:
+            st_ = char_status.get(i, "wrong")
+            color = "#e5e5e7" if st_ == "ok" else "#ff6961"
+            weight = "" if st_ == "ok" else "font-weight:600;"
+            parts.append(f"<span style='color:{color};{weight}'>{escape(ch)}</span>")
+
+    note = ""
+    if extra_count > 0:
+        note = (
+            f"<div style='color:#ff9f0a;margin-top:8px;font-size:13px'>"
+            f"另外你多打或打錯了約 {extra_count} 個字元（未列在上方）</div>"
+        )
+
+    return (
+        "<div style='font-family:monospace;white-space:pre-wrap;"
+        "background:#1c1c1e;padding:14px;border-radius:8px;line-height:1.6'>"
+        + "".join(parts)
+        + "</div>"
+        + note
+    )
 
 
 # ---------- 七段顯示器繪圖 ----------
@@ -223,7 +295,6 @@ def _digit_svg(segments, dp_on, x_offset):
 
 
 def render_seven_seg(digit_specs, label=""):
-    """digit_specs: list of (segments_tuple, dp_on_bool)"""
     total_w = len(digit_specs) * (DIGIT_W + GAP) + 10
     body = "".join(
         _digit_svg(segs, dp, 10 + i * (DIGIT_W + GAP))
@@ -263,7 +334,7 @@ with tab1:
 
     ensure_random(q_id)
 
-    reroll = st.button("換一組亂數（重新出題）")
+    reroll = st.button("換一組")
     if reroll:
         if q_id == "117001":
             st.session_state["q1_digits"] = [random.randint(0, 9) for _ in range(4)]
@@ -301,7 +372,7 @@ with tab1:
     if "code_area" not in st.session_state:
         st.session_state["code_area"] = ""
 
-    user_code = st.text_area("請默寫完整程式碼", height=300, key="code_area")
+    user_code = st.text_area("請默寫完整程式碼", height=320, key="code_area")
 
     col1, col2 = st.columns(2)
     check = col1.button("檢查答案", use_container_width=True)
@@ -321,12 +392,9 @@ with tab1:
                 st.success("正確")
             else:
                 st.error("不正確")
-                st.markdown("**差異對照**（紅字為標準答案中你漏寫或寫錯的部分，綠字為你多寫或寫錯的部分）")
+                st.markdown("**對照（紅字為漏寫或寫錯的部分）**")
                 st.markdown(
-                    f"<div style='font-family:monospace;white-space:pre-wrap;"
-                    f"word-break:break-all;background:#1c1c1e;padding:12px;"
-                    f"border-radius:8px'>{diff_html(correct_code, user_code)}</div>",
-                    unsafe_allow_html=True,
+                    diff_pretty_html(correct_code, user_code), unsafe_allow_html=True
                 )
 
             if name.strip():
