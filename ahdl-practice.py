@@ -206,56 +206,35 @@ def is_correct(correct: str, user_input: str) -> bool:
     return normalize(correct) == normalize(user_input)
 
 
-def diff_pretty_html(correct_code: str, user_code: str) -> str:
-    """保留 correct_code 原本的縮排/換行（直式），只在非空白字元上標示對錯"""
-    norm_correct_chars = []
-    map_correct = []
-    for i, ch in enumerate(correct_code):
-        if not ch.isspace():
-            norm_correct_chars.append(ch)
-            map_correct.append(i)
-    norm_correct_str = "".join(norm_correct_chars)
-    norm_user_str = normalize(user_code)
+def line_diff_html(correct_code: str, user_code: str) -> str:
+    """逐行比對，單一行錯誤只標示那一行，不影響其他行的判定"""
+    correct_lines = correct_code.split("\n")
+    correct_norm_lines = [normalize(line) for line in correct_lines]
+    user_norm_lines = [
+        normalize(line) for line in user_code.split("\n") if line.strip() != ""
+    ]
 
-    status = ["wrong"] * len(norm_correct_str)
-    extra_count = 0
-    sm = difflib.SequenceMatcher(None, norm_correct_str, norm_user_str)
+    line_ok = [False] * len(correct_lines)
+    sm = difflib.SequenceMatcher(None, correct_norm_lines, user_norm_lines)
     for tag, i1, i2, j1, j2 in sm.get_opcodes():
         if tag == "equal":
             for k in range(i1, i2):
-                status[k] = "ok"
-        elif tag == "insert":
-            extra_count += j2 - j1
-        elif tag == "replace":
-            extra_count += j2 - j1
+                line_ok[k] = True
 
-    char_status = {}
-    for norm_idx, orig_idx in enumerate(map_correct):
-        char_status[orig_idx] = status[norm_idx]
-
-    parts = []
-    for i, ch in enumerate(correct_code):
-        if ch.isspace():
-            parts.append(ch)
+    html_lines = []
+    for i, line in enumerate(correct_lines):
+        if line_ok[i]:
+            html_lines.append(
+                f"<div style='color:#e5e5e7;white-space:pre'>{escape(line)}</div>"
+            )
         else:
-            st_ = char_status.get(i, "wrong")
-            color = "#e5e5e7" if st_ == "ok" else "#ff6961"
-            weight = "" if st_ == "ok" else "font-weight:600;"
-            parts.append(f"<span style='color:{color};{weight}'>{escape(ch)}</span>")
-
-    note = ""
-    if extra_count > 0:
-        note = (
-            f"<div style='color:#ff9f0a;margin-top:8px;font-size:13px'>"
-            f"另外你多打或打錯了約 {extra_count} 個字元（未列在上方）</div>"
-        )
+            html_lines.append(
+                f"<div style='color:#ff6961;font-weight:600;white-space:pre'>{escape(line)}</div>"
+            )
 
     return (
-        "<div style='font-family:monospace;white-space:pre-wrap;"
-        "background:#1c1c1e;padding:14px;border-radius:8px;line-height:1.6'>"
-        + "".join(parts)
-        + "</div>"
-        + note
+        "<div style='font-family:monospace;background:#1c1c1e;padding:14px;"
+        "border-radius:8px;line-height:1.6'>" + "".join(html_lines) + "</div>"
     )
 
 
@@ -392,9 +371,9 @@ with tab1:
                 st.success("正確")
             else:
                 st.error("不正確")
-                st.markdown("**對照（紅字為漏寫或寫錯的部分）**")
+                st.markdown("**對照（紅字為該行有誤，其餘行不受影響）**")
                 st.markdown(
-                    diff_pretty_html(correct_code, user_code), unsafe_allow_html=True
+                    line_diff_html(correct_code, user_code), unsafe_allow_html=True
                 )
 
             if name.strip():
@@ -427,13 +406,15 @@ with tab2:
             df["題目"] = df["題目代碼"].map(lambda x: QUESTIONS[x]["title"])
             df["結果"] = df["correct"].map(lambda x: "對" if x == 1 else "錯")
 
-            total = len(df)
-            correct_count = int(df["correct"].sum())
-
-            col1, col2, col3 = st.columns(3)
-            col1.metric("練習次數", total)
-            col2.metric("答對次數", correct_count)
-            col3.metric("答錯次數", total - correct_count)
+            for qid, qinfo in QUESTIONS.items():
+                sub = df[df["題目代碼"] == qid]
+                q_total = len(sub)
+                q_correct = int(sub["correct"].sum())
+                st.markdown(f"**{qinfo['title']}**")
+                c1, c2, c3 = st.columns(3)
+                c1.metric("練習次數", q_total)
+                c2.metric("答對次數", q_correct)
+                c3.metric("答錯次數", q_total - q_correct)
 
             st.markdown("**詳細紀錄**")
             st.dataframe(
