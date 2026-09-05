@@ -1,4 +1,5 @@
 import re
+import random
 import difflib
 import sqlite3
 import datetime
@@ -19,7 +20,8 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
             question TEXT NOT NULL,
-            accuracy REAL NOT NULL,
+            digits TEXT NOT NULL,
+            correct INTEGER NOT NULL,
             time TEXT NOT NULL
         )
         """
@@ -30,20 +32,77 @@ def init_db():
 
 conn = init_db()
 
+# 117001：四個數字對應的七段顯示碼 (a,b,c,d,e,f,g)，1=亮
+Q1_SEGMENTS = {
+    0: (1, 1, 1, 1, 1, 1, 0),
+    1: (0, 1, 1, 0, 0, 0, 0),
+    2: (1, 1, 0, 1, 1, 0, 1),
+    3: (1, 1, 1, 1, 0, 0, 1),
+    4: (0, 1, 1, 0, 0, 1, 1),
+    5: (1, 0, 1, 1, 0, 1, 1),
+    6: (1, 0, 1, 1, 1, 1, 1),
+    7: (1, 1, 1, 0, 0, 0, 0),
+    8: (1, 1, 1, 1, 1, 1, 1),
+    9: (1, 1, 1, 1, 0, 1, 1),
+}
+
+# 117002：數字對應的七段顯示 16 進位碼（此電路為 active-low 編碼）
+Q2_HEX = {
+    0: "01",
+    1: "4f",
+    2: "12",
+    3: "06",
+    4: "4c",
+    5: "24",
+    6: "20",
+    7: "0f",
+    8: "00",
+    9: "0c",
+}
+
+
+def build_117001(digits):
+    dsel = [(1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1)]
+    rows = []
+    for i, digit in enumerate(digits):
+        seg = Q1_SEGMENTS[digit]
+        vals = list(dsel[i]) + list(seg) + [1]
+        rows.append(f"{i}=>{','.join(map(str, vals))};")
+    return (
+        "subdesign 117001 ( clk:input; d1,d2,d3,d4:output; "
+        "a,b,c,d,e,f,g,dp:output; ) variable cnt[15..0]:dff; "
+        "begin cnt[].clk=!clk; cnt[]=cnt[]+1; "
+        "table cnt[15..14]=>d1,d2,d3,d4,a,b,c,d,e,f,g,dp; "
+        + " ".join(rows)
+        + " end table; end;"
+    )
+
+
+def build_117002(d1, d2):
+    hex1, hex2 = Q2_HEX[d1], Q2_HEX[d2]
+    return (
+        "subdesign 117002 ( clk,colume[2..0] :input; "
+        "row[3..0],a,b,c,d,e,f,g : output; ) "
+        "variable cnt[17..0],edge[1..0] :dff; disp[6..0] :latch; "
+        "begin cnt[].clk=!clk; cnt[]=cnt[]+1; "
+        "table cnt[17..16]=>row[3..0]; 0=>1; 1=>2; 2=>4; 3=>8; end table; "
+        "edge[].clk=!cnt[11]; "
+        "edge[0]=colume[0]#colume[1]#colume[2]; edge[1]=edge[0]; "
+        "disp[].ena=edge[0]&!edge[1]; "
+        "table row[3..0],colume[2..0]=>disp[]; "
+        "1,1=>h\"4f\"; 1,2=>h\"12\"; 1,4=>h\"06\"; "
+        "2,1=>h\"4c\"; 2,2=>h\"24\"; 2,4=>h\"20\"; "
+        "4,1=>h\"0f\"; 4,2=>h\"00\"; 4,4=>h\"0c\"; "
+        f"8,1=>h\"{hex1}\"; 8,2=>h\"01\"; 8,4=>h\"{hex2}\"; "
+        "end table; "
+        "a=disp[6]; b=disp[5]; c=disp[4]; d=disp[3]; "
+        "e=disp[2]; f=disp[1]; g=disp[0]; end;"
+    )
+
+
 QUESTIONS = {
     "117001": {
         "title": "117001 顯示器掃描",
-        "code": (
-            "subdesign 117001 ( clk:input; d1,d2,d3,d4:output; "
-            "a,b,c,d,e,f,g,dp:output; ) variable cnt[15..0]:dff; "
-            "begin cnt[].clk=!clk; cnt[]=cnt[]+1; "
-            "table cnt[15..14]=>d1,d2,d3,d4,a,b,c,d,e,f,g,dp; "
-            "0=>1,0,0,0,0,1,1,0,0,0,0,1; "
-            "1=>0,1,0,0,1,1,0,1,1,0,1,1; "
-            "2=>0,0,1,0,1,1,1,1,0,0,1,1; "
-            "3=>0,0,0,1,0,0,0,0,0,0,0,1; "
-            "end table; end;"
-        ),
         "explanation": """
 **電路功能**：四位數七段顯示器動態掃描
 
@@ -54,30 +113,13 @@ QUESTIONS = {
   - 該位數對應要顯示的七段字型（`a`~`g`, `dp`）
 - 因為只用最高兩位，所以每個掃描狀態會維持計數器的低 14 位跑完一輪，掃描速度夠快，
   肉眼因視覺暫留會覺得四位數字是「同時」穩定顯示，其實是輪流快速切換的動態掃描（多工顯示）。
+- 檢定時四個數字會隨機指定，需依指定數字自行填入對應的七段字型碼。
 
 **重點觀念**：時脈除頻 + table 對照 + 動態掃描（多工），是七段顯示器常見的省接腳做法。
 """,
     },
     "117002": {
         "title": "117002 鍵盤掃描",
-        "code": (
-            "subdesign 117002 ( clk,colume[2..0] :input; "
-            "row[3..0],a,b,c,d,e,f,g : output; ) "
-            "variable cnt[17..0],edge[1..0] :dff; disp[6..0] :latch; "
-            "begin cnt[].clk=!clk; cnt[]=cnt[]+1; "
-            "table cnt[17..16]=>row[3..0]; 0=>1; 1=>2; 2=>4; 3=>8; end table; "
-            "edge[].clk=!cnt[11]; "
-            "edge[0]=colume[0]#colume[1]#colume[2]; edge[1]=edge[0]; "
-            "disp[].ena=edge[0]&!edge[1]; "
-            "table row[3..0],colume[2..0]=>disp[]; "
-            "1,1=>h\"4f\"; 1,2=>h\"12\"; 1,4=>h\"06\"; "
-            "2,1=>h\"4c\"; 2,2=>h\"24\"; 2,4=>h\"20\"; "
-            "4,1=>h\"0f\"; 4,2=>h\"00\"; 4,4=>h\"0c\"; "
-            "8,1=>h\"72\"; 8,2=>h\"01\"; 8,4=>h\"66\"; "
-            "end table; "
-            "a=disp[6]; b=disp[5]; c=disp[4]; d=disp[3]; "
-            "e=disp[2]; f=disp[1]; g=disp[0]; end;"
-        ),
         "explanation": """
 **電路功能**：4x3 鍵盤矩陣掃描並顯示按鍵數字
 
@@ -91,6 +133,7 @@ QUESTIONS = {
     避免掃描過程中重複觸發或彈跳（防彈跳/去抖動的簡易做法）。
 - 觸發當下的 `row[3..0], colume[2..0]` 組合透過第二個 table 對照出對應的七段字型碼
   （以 16 進位存入 `disp[6..0]`），最後拆解到 `a`~`g` 輸出。
+- 檢定時 `8,1` 與 `8,4` 這兩個按鍵對應的數字會隨機指定，需自行填入對應的七段字型碼。
 
 **重點觀念**：row 掃描 + column 讀取 + 邊緣觸發鎖存，是鍵盤矩陣掃描電路的典型結構。
 """,
@@ -102,10 +145,8 @@ def normalize(text: str) -> str:
     return re.sub(r"\s+", "", text)
 
 
-def compute_accuracy(correct: str, user_input: str) -> float:
-    a, b = normalize(correct), normalize(user_input)
-    ratio = difflib.SequenceMatcher(None, a, b).ratio()
-    return round(ratio * 100, 1)
+def is_correct(correct: str, user_input: str) -> bool:
+    return normalize(correct) == normalize(user_input)
 
 
 def diff_html(correct: str, user_input: str) -> str:
@@ -127,6 +168,13 @@ def diff_html(correct: str, user_input: str) -> str:
     return "".join(parts)
 
 
+def ensure_random(q_id: str):
+    if q_id == "117001" and "q1_digits" not in st.session_state:
+        st.session_state["q1_digits"] = [random.randint(0, 9) for _ in range(4)]
+    if q_id == "117002" and "q2_digits" not in st.session_state:
+        st.session_state["q2_digits"] = (random.randint(0, 9), random.randint(0, 9))
+
+
 st.title("AHDL 默寫練習")
 
 tab1, tab2, tab3 = st.tabs(["默寫模式", "我的紀錄", "程式說明"])
@@ -136,6 +184,28 @@ with tab1:
     q_id = st.selectbox(
         "選擇題目", list(QUESTIONS.keys()), format_func=lambda x: QUESTIONS[x]["title"]
     )
+
+    ensure_random(q_id)
+
+    reroll = st.button("換一組亂數（重新指定要顯示的數字）")
+    if reroll:
+        if q_id == "117001":
+            st.session_state["q1_digits"] = [random.randint(0, 9) for _ in range(4)]
+        else:
+            st.session_state["q2_digits"] = (random.randint(0, 9), random.randint(0, 9))
+        st.session_state["code_area"] = ""
+        st.rerun()
+
+    if q_id == "117001":
+        digits = st.session_state["q1_digits"]
+        st.info(f"本次要顯示的四個數字（依序對應 d1, d2, d3, d4）：{', '.join(map(str, digits))}")
+        correct_code = build_117001(digits)
+        digits_label = "-".join(map(str, digits))
+    else:
+        d1, d2 = st.session_state["q2_digits"]
+        st.info(f"本次按鍵 8,1 要顯示的數字：{d1}　按鍵 8,4 要顯示的數字：{d2}")
+        correct_code = build_117002(d1, d2)
+        digits_label = f"{d1}-{d2}"
 
     if "code_area" not in st.session_state:
         st.session_state["code_area"] = ""
@@ -154,27 +224,27 @@ with tab1:
         if not user_code.strip():
             st.warning("請先輸入程式碼")
         else:
-            correct = QUESTIONS[q_id]["code"]
-            accuracy = compute_accuracy(correct, user_code)
-            st.metric("正確率", f"{accuracy}%")
+            correct = is_correct(correct_code, user_code)
 
-            if accuracy >= 100:
-                st.success("完全正確")
+            if correct:
+                st.success("正確")
             else:
+                st.error("不正確")
                 st.markdown("**差異對照**（紅底為標準答案中你漏寫或寫錯的部分，綠底為你多寫或寫錯的部分）")
                 st.markdown(
                     f"<div style='font-family:monospace;white-space:pre-wrap;"
-                    f"word-break:break-all'>{diff_html(correct, user_code)}</div>",
+                    f"word-break:break-all'>{diff_html(correct_code, user_code)}</div>",
                     unsafe_allow_html=True,
                 )
 
             if name.strip():
                 conn.execute(
-                    "INSERT INTO records (name, question, accuracy, time) VALUES (?, ?, ?, ?)",
+                    "INSERT INTO records (name, question, digits, correct, time) VALUES (?, ?, ?, ?, ?)",
                     (
                         name.strip(),
                         q_id,
-                        accuracy,
+                        digits_label,
+                        1 if correct else 0,
                         datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     ),
                 )
@@ -188,31 +258,28 @@ with tab2:
 
     if query_name.strip():
         rows = conn.execute(
-            "SELECT question, accuracy, time FROM records WHERE name=? ORDER BY time DESC",
+            "SELECT question, digits, correct, time FROM records WHERE name=? ORDER BY time DESC",
             (query_name.strip(),),
         ).fetchall()
 
         if rows:
-            df = pd.DataFrame(rows, columns=["題目代碼", "正確率", "時間"])
+            df = pd.DataFrame(rows, columns=["題目代碼", "隨機數字", "correct", "時間"])
             df["題目"] = df["題目代碼"].map(lambda x: QUESTIONS[x]["title"])
+            df["結果"] = df["correct"].map(lambda x: "對" if x == 1 else "錯")
 
-            col1, col2 = st.columns(2)
-            col1.metric("練習次數", len(df))
-            col2.metric("平均正確率", f"{round(df['正確率'].mean(), 1)}%")
+            total = len(df)
+            correct_count = int(df["correct"].sum())
 
-            st.markdown("**各題目平均正確率**")
-            st.bar_chart(df.groupby("題目")["正確率"].mean().round(1))
-
-            st.markdown("**錯題統計**（正確率未達 100% 的次數）")
-            wrong = df[df["正確率"] < 100].groupby("題目").size()
-            if len(wrong) > 0:
-                st.bar_chart(wrong)
-            else:
-                st.write("目前沒有錯題紀錄")
+            col1, col2, col3 = st.columns(3)
+            col1.metric("練習次數", total)
+            col2.metric("答對次數", correct_count)
+            col3.metric("答錯次數", total - correct_count)
 
             st.markdown("**詳細紀錄**")
             st.dataframe(
-                df[["題目", "正確率", "時間"]], use_container_width=True, hide_index=True
+                df[["題目", "隨機數字", "結果", "時間"]],
+                use_container_width=True,
+                hide_index=True,
             )
         else:
             st.info("查無此練習者的紀錄")
