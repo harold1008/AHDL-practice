@@ -474,7 +474,7 @@ with tab1:
                 st.success("正確")
             else:
                 st.error("不正確")
-                st.markdown("**對照（紅字為該行有誤，其餘行不受影響）**")
+                st.markdown("**對照（紅字為該行有誤）**")
                 st.markdown(
                     line_diff_html(correct_code, user_code), unsafe_allow_html=True
                 )
