@@ -14,6 +14,14 @@ DB_PATH = "records.db"
 
 def init_db():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    existing_cols = [
+        r[1] for r in conn.execute("PRAGMA table_info(records)").fetchall()
+    ]
+    # 如果是舊版本資料表結構（沒有 digits / correct 欄位），重建資料表
+    if existing_cols and ("digits" not in existing_cols or "correct" not in existing_cols):
+        conn.execute("DROP TABLE records")
+        conn.commit()
+
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS records (
@@ -32,7 +40,7 @@ def init_db():
 
 conn = init_db()
 
-# 117001：四個數字對應的七段顯示碼 (a,b,c,d,e,f,g)，1=亮
+# 117001：數字對應的七段顯示碼 (a,b,c,d,e,f,g)，1=亮
 Q1_SEGMENTS = {
     0: (1, 1, 1, 1, 1, 1, 0),
     1: (0, 1, 1, 0, 0, 0, 0),
@@ -46,7 +54,7 @@ Q1_SEGMENTS = {
     9: (1, 1, 1, 1, 0, 1, 1),
 }
 
-# 117002：數字對應的七段顯示 16 進位碼（此電路為 active-low 編碼）
+# 117002：數字對應的七段顯示 16 進位碼（active-low：位元 0 代表該段點亮）
 Q2_HEX = {
     0: "01",
     1: "4f",
@@ -61,12 +69,20 @@ Q2_HEX = {
 }
 
 
+def decode_hex_segments(hex_str: str):
+    """把 active-low 的 16 進位字型碼解成 (a,b,c,d,e,f,g) 是否點亮的布林值"""
+    val = int(hex_str, 16) & 0x7F
+    bits = [(val >> i) & 1 for i in range(6, -1, -1)]
+    return tuple(bit == 0 for bit in bits)
+
+
 def build_117001(digits):
     dsel = [(1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1)]
     rows = []
     for i, digit in enumerate(digits):
         seg = Q1_SEGMENTS[digit]
-        vals = list(dsel[i]) + list(seg) + [1]
+        dp_bit = 0 if i == 2 else 1  # active-low：第 3 位數後方顯示小數點
+        vals = list(dsel[i]) + list(seg) + [dp_bit]
         rows.append(f"{i}=>{','.join(map(str, vals))};")
     return (
         "subdesign 117001 ( clk:input; d1,d2,d3,d4:output; "
@@ -113,7 +129,8 @@ QUESTIONS = {
   - 該位數對應要顯示的七段字型（`a`~`g`, `dp`）
 - 因為只用最高兩位，所以每個掃描狀態會維持計數器的低 14 位跑完一輪，掃描速度夠快，
   肉眼因視覺暫留會覺得四位數字是「同時」穩定顯示，其實是輪流快速切換的動態掃描（多工顯示）。
-- 檢定時四個數字會隨機指定，需依指定數字自行填入對應的七段字型碼。
+- 檢定時四個數字會隨機指定，且第 3 位數後方會亮小數點（例如畫面顯示 456.3），
+  需依指定的顯示圖案自行填入對應的七段字型碼與小數點位元。
 
 **重點觀念**：時脈除頻 + table 對照 + 動態掃描（多工），是七段顯示器常見的省接腳做法。
 """,
@@ -133,7 +150,7 @@ QUESTIONS = {
     避免掃描過程中重複觸發或彈跳（防彈跳/去抖動的簡易做法）。
 - 觸發當下的 `row[3..0], colume[2..0]` 組合透過第二個 table 對照出對應的七段字型碼
   （以 16 進位存入 `disp[6..0]`），最後拆解到 `a`~`g` 輸出。
-- 檢定時 `8,1` 與 `8,4` 這兩個按鍵對應的數字會隨機指定，需自行填入對應的七段字型碼。
+- 檢定時 `8,1` 與 `8,4` 這兩個按鍵對應的顯示圖案會隨機指定，需依畫面上的圖案自行填入對應字型碼。
 
 **重點觀念**：row 掃描 + column 讀取 + 邊緣觸發鎖存，是鍵盤矩陣掃描電路的典型結構。
 """,
@@ -155,17 +172,76 @@ def diff_html(correct: str, user_input: str) -> str:
     parts = []
     for tag, i1, i2, j1, j2 in sm.get_opcodes():
         if tag == "equal":
-            parts.append(a[i1:i2])
+            parts.append(f"<span style='color:#e5e5e7'>{a[i1:i2]}</span>")
         elif tag == "replace":
-            parts.append(f"<span style='background:#ffd6d6'>{a[i1:i2]}</span>")
-            parts.append(f"<span style='background:#d6ffd6'>{b[j1:j2]}</span>")
+            parts.append(
+                f"<span style='color:#ff6961;text-decoration:line-through'>{a[i1:i2]}</span>"
+            )
+            parts.append(f"<span style='color:#30d158'>{b[j1:j2]}</span>")
         elif tag == "delete":
             parts.append(
-                f"<span style='background:#ffd6d6;text-decoration:line-through'>{a[i1:i2]}</span>"
+                f"<span style='color:#ff6961;text-decoration:line-through'>{a[i1:i2]}</span>"
             )
         elif tag == "insert":
-            parts.append(f"<span style='background:#d6ffd6'>{b[j1:j2]}</span>")
+            parts.append(f"<span style='color:#30d158'>{b[j1:j2]}</span>")
     return "".join(parts)
+
+
+# ---------- 七段顯示器繪圖 ----------
+
+SEG_ON_COLOR = "#ff3b30"
+SEG_OFF_COLOR = "#3a3a3c"
+DIGIT_W, DIGIT_H, STROKE, GAP = 46, 84, 9, 26
+
+
+def _digit_svg(segments, dp_on, x_offset):
+    a, b, c, d, e, f, g = segments
+    tl, tr = (x_offset, 0), (x_offset + DIGIT_W, 0)
+    ml, mr = (x_offset, DIGIT_H / 2), (x_offset + DIGIT_W, DIGIT_H / 2)
+    bl, br = (x_offset, DIGIT_H), (x_offset + DIGIT_W, DIGIT_H)
+    segs = [
+        (tl, tr, a),
+        (tr, mr, b),
+        (mr, br, c),
+        (bl, br, d),
+        (ml, bl, e),
+        (tl, ml, f),
+        (ml, mr, g),
+    ]
+    lines = []
+    for p1, p2, on in segs:
+        color = SEG_ON_COLOR if on else SEG_OFF_COLOR
+        lines.append(
+            f"<line x1='{p1[0]}' y1='{p1[1]}' x2='{p2[0]}' y2='{p2[1]}' "
+            f"stroke='{color}' stroke-width='{STROKE}' stroke-linecap='round'/>"
+        )
+    dp_color = SEG_ON_COLOR if dp_on else SEG_OFF_COLOR
+    lines.append(
+        f"<circle cx='{x_offset + DIGIT_W + 9}' cy='{DIGIT_H}' r='5' fill='{dp_color}'/>"
+    )
+    return "".join(lines)
+
+
+def render_seven_seg(digit_specs, label=""):
+    """digit_specs: list of (segments_tuple, dp_on_bool)"""
+    total_w = len(digit_specs) * (DIGIT_W + GAP) + 10
+    body = "".join(
+        _digit_svg(segs, dp, 10 + i * (DIGIT_W + GAP))
+        for i, (segs, dp) in enumerate(digit_specs)
+    )
+    caption = (
+        f"<div style='color:#9a9a9e;font-size:13px;margin-bottom:6px'>{label}</div>"
+        if label
+        else ""
+    )
+    svg = (
+        f"<div style='display:inline-block;background:#1c1c1e;border-radius:10px;"
+        f"padding:14px 18px;margin:4px 10px 4px 0'>{caption}"
+        f"<svg width='{total_w}' height='{DIGIT_H + 12}' "
+        f"viewBox='0 0 {total_w} {DIGIT_H + 12}' xmlns='http://www.w3.org/2000/svg'>{body}</svg>"
+        f"</div>"
+    )
+    return svg
 
 
 def ensure_random(q_id: str):
@@ -187,7 +263,7 @@ with tab1:
 
     ensure_random(q_id)
 
-    reroll = st.button("換一組亂數（重新指定要顯示的數字）")
+    reroll = st.button("換一組亂數（重新出題）")
     if reroll:
         if q_id == "117001":
             st.session_state["q1_digits"] = [random.randint(0, 9) for _ in range(4)]
@@ -196,14 +272,29 @@ with tab1:
         st.session_state["code_area"] = ""
         st.rerun()
 
+    st.markdown("**本次題目**")
+
     if q_id == "117001":
         digits = st.session_state["q1_digits"]
-        st.info(f"本次要顯示的四個數字（依序對應 d1, d2, d3, d4）：{', '.join(map(str, digits))}")
+        specs = [
+            (tuple(v == 1 for v in Q1_SEGMENTS[d]), i == 2) for i, d in enumerate(digits)
+        ]
+        st.markdown(render_seven_seg(specs), unsafe_allow_html=True)
         correct_code = build_117001(digits)
         digits_label = "-".join(map(str, digits))
     else:
         d1, d2 = st.session_state["q2_digits"]
-        st.info(f"本次按鍵 8,1 要顯示的數字：{d1}　按鍵 8,4 要顯示的數字：{d2}")
+        col_a, col_b = st.columns(2)
+        with col_a:
+            st.markdown(
+                render_seven_seg([(decode_hex_segments(Q2_HEX[d1]), False)], "按鍵 8,1"),
+                unsafe_allow_html=True,
+            )
+        with col_b:
+            st.markdown(
+                render_seven_seg([(decode_hex_segments(Q2_HEX[d2]), False)], "按鍵 8,4"),
+                unsafe_allow_html=True,
+            )
         correct_code = build_117002(d1, d2)
         digits_label = f"{d1}-{d2}"
 
@@ -230,10 +321,11 @@ with tab1:
                 st.success("正確")
             else:
                 st.error("不正確")
-                st.markdown("**差異對照**（紅底為標準答案中你漏寫或寫錯的部分，綠底為你多寫或寫錯的部分）")
+                st.markdown("**差異對照**（紅字為標準答案中你漏寫或寫錯的部分，綠字為你多寫或寫錯的部分）")
                 st.markdown(
                     f"<div style='font-family:monospace;white-space:pre-wrap;"
-                    f"word-break:break-all'>{diff_html(correct_code, user_code)}</div>",
+                    f"word-break:break-all;background:#1c1c1e;padding:12px;"
+                    f"border-radius:8px'>{diff_html(correct_code, user_code)}</div>",
                     unsafe_allow_html=True,
                 )
 
