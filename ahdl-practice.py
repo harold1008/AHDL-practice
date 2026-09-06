@@ -409,7 +409,7 @@ st.title("AHDL 默寫練習")
 tab1, tab2, tab3 = st.tabs(["默寫模式", "我的紀錄", "程式說明"])
 
 with tab1:
-    name = st.text_input("練習者姓名", key="name_input", placeholder="留空則不記錄成績")
+    name = st.text_input("練習者姓名", key="name_input", placeholder="留空不記錄成績")
     q_id = st.selectbox(
         "選擇題目", list(QUESTIONS.keys()), format_func=lambda x: QUESTIONS[x]["title"]
     )
